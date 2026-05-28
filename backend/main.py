@@ -1,9 +1,10 @@
 """
 Task Manager API - FastAPI Server
-CRUD операции для управления задачами
+CRUD операции для управления задачами с хранением в SQLite
 """
 import json
 import os
+import sqlite3
 from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Query
@@ -26,32 +27,102 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Путь к файлу с данными
-DATA_FILE = "tasks.json"
+# Путь к базе данных
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+DB_DIR = os.path.join(BASE_DIR, "db")
+DB_PATH = os.path.join(DB_DIR, "data.sqlite")
+
+# Создаём директорию для БД, если её нет
+os.makedirs(DB_DIR, exist_ok=True)
 
 
-def load_tasks() -> List[dict]:
-    """Загрузка задач из JSON файла"""
-    if not os.path.exists(DATA_FILE):
-        return []
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, IOError):
-        return []
+def get_db_connection():
+    """Возвращает соединение с SQLite"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # позволяет обращаться к колонкам по имени
+    return conn
 
 
-def save_tasks(tasks: List[dict]) -> None:
-    """Сохранение задач в JSON файл"""
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(tasks, f, ensure_ascii=False, indent=2, default=str)
+def init_db():
+    """Создаёт таблицу tasks, если она не существует"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                priority TEXT,
+                category TEXT,
+                is_important INTEGER NOT NULL DEFAULT 0,
+                is_completed INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
 
 
-def get_next_id(tasks: List[dict]) -> int:
-    """Получение следующего ID для новой задачи"""
-    if not tasks:
-        return 1
-    return max(task["id"] for task in tasks) + 1
+def insert_initial_data():
+    """Добавляет начальные записи, если таблица пуста"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM tasks")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            # Примеры задач из условия (без id, сгенерируются автоматически)
+            now = datetime.now().isoformat()
+            initial_tasks = [
+                {
+                    "title": "Настроить Docker",
+                    "description": "Создать Dockerfile для фронтенда и бэкенда",
+                    "priority": "medium",
+                    "category": "work",
+                    "is_important": False,
+                    "is_completed": True,
+                    "created_at": "2026-01-09T14:30:00",
+                    "updated_at": "2026-01-10T09:00:00"
+                },
+                {
+                    "title": "Купить продукты",
+                    "description": "Молоко, хлеб, яйца, фрукты",
+                    "priority": "low",
+                    "category": "personal",
+                    "is_important": False,
+                    "is_completed": True,
+                    "created_at": "2026-01-10T08:00:00",
+                    "updated_at": "2026-01-09T22:37:24.230848"
+                },
+                {
+                    "title": "Тестовая задача2",
+                    "description": "тест-тест",
+                    "priority": "high",
+                    "category": "work",
+                    "is_important": True,
+                    "is_completed": False,
+                    "created_at": "2026-01-09T22:37:35.482680",
+                    "updated_at": "2026-05-22T21:41:04.269763"
+                }
+            ]
+            for task in initial_tasks:
+                cursor.execute("""
+                    INSERT INTO tasks 
+                    (title, description, priority, category, is_important, is_completed, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    task["title"], task["description"], task["priority"],
+                    task["category"], int(task["is_important"]), int(task["is_completed"]),
+                    task["created_at"], task["updated_at"]
+                ))
+            conn.commit()
+
+
+@app.on_event("startup")
+def startup_event():
+    """Инициализация БД при запуске приложения"""
+    init_db()
+    insert_initial_data()
 
 
 @app.get("/")
@@ -63,29 +134,47 @@ async def root():
 @app.get("/api/tasks", response_model=List[Task])
 async def get_tasks(
     status: Optional[str] = Query(None, description="Фильтр по статусу: all, completed, pending"),
-    sort_by: Optional[str] = Query(None, description="Сортировка: date, title"),
+    sort_by: Optional[str] = Query(None, description="Сортировка: date, title, priority"),
     sort_order: Optional[str] = Query("asc", description="Порядок сортировки: asc, desc")
 ):
     """
     Получение списка всех задач с возможностью фильтрации и сортировки
     """
-    tasks = load_tasks()
+    query = "SELECT * FROM tasks"
+    params = []
     
     # Фильтрация по статусу
     if status == "completed":
-        tasks = [t for t in tasks if t.get("is_completed", False)]
+        query += " WHERE is_completed = 1"
     elif status == "pending":
-        tasks = [t for t in tasks if not t.get("is_completed", False)]
+        query += " WHERE is_completed = 0"
     
     # Сортировка
-    reverse = sort_order == "desc"
     if sort_by == "title":
-        tasks = sorted(tasks, key=lambda x: x.get("title", "").lower(), reverse=reverse)
+        order_col = "title"
     elif sort_by == "date":
-        tasks = sorted(tasks, key=lambda x: x.get("created_at", ""), reverse=reverse)
+        order_col = "created_at"
     elif sort_by == "priority":
-        priority_order = {"high": 0, "medium": 1, "low": 2}
-        tasks = sorted(tasks, key=lambda x: priority_order.get(x.get("priority", "medium"), 1), reverse=reverse)
+        # сортировка по приоритету: high, medium, low
+        order_col = "CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 1 END"
+    else:
+        order_col = "id"  # по умолчанию сортировка по id
+    
+    order_dir = "DESC" if sort_order == "desc" else "ASC"
+    query += f" ORDER BY {order_col} {order_dir}"
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+    
+    # Преобразуем sqlite3.Row в dict и bool для is_important/is_completed
+    tasks = []
+    for row in rows:
+        task = dict(row)
+        task["is_important"] = bool(task["is_important"])
+        task["is_completed"] = bool(task["is_completed"])
+        tasks.append(task)
     
     return tasks
 
@@ -95,11 +184,18 @@ async def get_task(task_id: int):
     """
     Получение задачи по ID
     """
-    tasks = load_tasks()
-    for task in tasks:
-        if task["id"] == task_id:
-            return task
-    raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
+    
+    task = dict(row)
+    task["is_important"] = bool(task["is_important"])
+    task["is_completed"] = bool(task["is_completed"])
+    return task
 
 
 @app.post("/api/tasks", response_model=Task, status_code=201)
@@ -107,25 +203,34 @@ async def create_task(task_data: TaskCreate):
     """
     Создание новой задачи
     """
-    tasks = load_tasks()
-    
     now = datetime.now().isoformat()
-    new_task = {
-        "id": get_next_id(tasks),
-        "title": task_data.title,
-        "description": task_data.description,
-        "priority": task_data.priority.value,
-        "category": task_data.category.value,
-        "is_important": task_data.is_important,
-        "is_completed": task_data.is_completed,
-        "created_at": now,
-        "updated_at": now
-    }
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO tasks 
+            (title, description, priority, category, is_important, is_completed, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            task_data.title,
+            task_data.description,
+            task_data.priority.value,
+            task_data.category.value,
+            int(task_data.is_important),
+            int(task_data.is_completed),
+            now,
+            now
+        ))
+        conn.commit()
+        task_id = cursor.lastrowid
+        
+        # Получаем созданную задачу
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
     
-    tasks.append(new_task)
-    save_tasks(tasks)
-    
-    return new_task
+    task = dict(row)
+    task["is_important"] = bool(task["is_important"])
+    task["is_completed"] = bool(task["is_completed"])
+    return task
 
 
 @app.put("/api/tasks/{task_id}", response_model=Task)
@@ -133,26 +238,58 @@ async def update_task(task_id: int, task_data: TaskUpdate):
     """
     Обновление существующей задачи
     """
-    tasks = load_tasks()
+    # Сначала проверим, существует ли задача
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        existing = cursor.fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
     
-    for i, task in enumerate(tasks):
-        if task["id"] == task_id:
-            # Обновляем только переданные поля
-            update_dict = task_data.model_dump(exclude_unset=True)
-            
-            for key, value in update_dict.items():
-                if value is not None:
-                    if isinstance(value, (Priority, Category)):
-                        task[key] = value.value
-                    else:
-                        task[key] = value
-            
-            task["updated_at"] = datetime.now().isoformat()
-            tasks[i] = task
-            save_tasks(tasks)
-            return task
+    # Формируем динамический UPDATE
+    update_fields = []
+    params = []
     
-    raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
+    if task_data.title is not None:
+        update_fields.append("title = ?")
+        params.append(task_data.title)
+    if task_data.description is not None:
+        update_fields.append("description = ?")
+        params.append(task_data.description)
+    if task_data.priority is not None:
+        update_fields.append("priority = ?")
+        params.append(task_data.priority.value)
+    if task_data.category is not None:
+        update_fields.append("category = ?")
+        params.append(task_data.category.value)
+    if task_data.is_important is not None:
+        update_fields.append("is_important = ?")
+        params.append(int(task_data.is_important))
+    if task_data.is_completed is not None:
+        update_fields.append("is_completed = ?")
+        params.append(int(task_data.is_completed))
+    
+    # Всегда обновляем updated_at
+    now = datetime.now().isoformat()
+    update_fields.append("updated_at = ?")
+    params.append(now)
+    
+    params.append(task_id)
+    query = f"UPDATE tasks SET {', '.join(update_fields)} WHERE id = ?"
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        conn.commit()
+        
+        # Получаем обновлённую задачу
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+    
+    task = dict(row)
+    task["is_important"] = bool(task["is_important"])
+    task["is_completed"] = bool(task["is_completed"])
+    return task
 
 
 @app.patch("/api/tasks/{task_id}/toggle", response_model=Task)
@@ -160,17 +297,25 @@ async def toggle_task_status(task_id: int):
     """
     Переключение статуса выполнения задачи
     """
-    tasks = load_tasks()
+    now = datetime.now().isoformat()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE tasks 
+            SET is_completed = NOT is_completed, updated_at = ?
+            WHERE id = ?
+        """, (now, task_id))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
+        conn.commit()
+        
+        cursor.execute("SELECT * FROM tasks WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
     
-    for i, task in enumerate(tasks):
-        if task["id"] == task_id:
-            task["is_completed"] = not task.get("is_completed", False)
-            task["updated_at"] = datetime.now().isoformat()
-            tasks[i] = task
-            save_tasks(tasks)
-            return task
-    
-    raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
+    task = dict(row)
+    task["is_important"] = bool(task["is_important"])
+    task["is_completed"] = bool(task["is_completed"])
+    return task
 
 
 @app.delete("/api/tasks/{task_id}")
@@ -178,15 +323,19 @@ async def delete_task(task_id: int):
     """
     Удаление задачи по ID
     """
-    tasks = load_tasks()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Сначала получим название задачи для ответа
+        cursor.execute("SELECT title FROM tasks WHERE id = ?", (task_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
+        title = row["title"]
+        
+        cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+        conn.commit()
     
-    for i, task in enumerate(tasks):
-        if task["id"] == task_id:
-            deleted_task = tasks.pop(i)
-            save_tasks(tasks)
-            return {"message": f"Задача '{deleted_task['title']}' успешно удалена", "id": task_id}
-    
-    raise HTTPException(status_code=404, detail=f"Задача с ID {task_id} не найдена")
+    return {"message": f"Задача '{title}' успешно удалена", "id": task_id}
 
 
 @app.get("/api/stats")
@@ -194,36 +343,46 @@ async def get_stats():
     """
     Получение статистики по задачам
     """
-    tasks = load_tasks()
-    
-    total = len(tasks)
-    completed = sum(1 for t in tasks if t.get("is_completed", False))
-    pending = total - completed
-    important = sum(1 for t in tasks if t.get("is_important", False))
-    
-    # Статистика по категориям
-    categories = {}
-    for task in tasks:
-        cat = task.get("category", "other")
-        categories[cat] = categories.get(cat, 0) + 1
-    
-    # Статистика по приоритетам
-    priorities = {}
-    for task in tasks:
-        pri = task.get("priority", "medium")
-        priorities[pri] = priorities.get(pri, 0) + 1
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        # Общая статистика
+        cursor.execute("SELECT COUNT(*) as total FROM tasks")
+        total = cursor.fetchone()["total"]
+        
+        cursor.execute("SELECT COUNT(*) as completed FROM tasks WHERE is_completed = 1")
+        completed = cursor.fetchone()["completed"]
+        
+        cursor.execute("SELECT COUNT(*) as important FROM tasks WHERE is_important = 1")
+        important = cursor.fetchone()["important"]
+        
+        pending = total - completed
+        
+        # Статистика по категориям
+        cursor.execute("""
+            SELECT category, COUNT(*) as count 
+            FROM tasks 
+            GROUP BY category
+        """)
+        by_category = {row["category"]: row["count"] for row in cursor.fetchall()}
+        
+        # Статистика по приоритетам
+        cursor.execute("""
+            SELECT priority, COUNT(*) as count 
+            FROM tasks 
+            GROUP BY priority
+        """)
+        by_priority = {row["priority"]: row["count"] for row in cursor.fetchall()}
     
     return {
         "total": total,
         "completed": completed,
         "pending": pending,
         "important": important,
-        "by_category": categories,
-        "by_priority": priorities
+        "by_category": by_category,
+        "by_priority": by_priority
     }
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-    # uvicorn.run(app, host="127.0.0.1", port=8000) # loopback

@@ -9,8 +9,10 @@ services:
       - "8000:8000"
     volumes:
       # Том для сохранения данных
-      - task-data:/app/data
-      - ./backend/tasks.json:/app/data/tasks.json
+      # - task-data:/app/data
+      - tasks-db-data:/db
+      # - ./backend/tasks.json:/app/data/tasks.json
+      - ./db:/db
     environment:
       - PYTHONUNBUFFERED=1
     networks:
@@ -22,5 +24,8 @@ networks:
     driver: bridge
 
 volumes:
-  task-data:
+  # task-data:
+  #   driver: local
+
+  tasks-db-data:
     driver: local
