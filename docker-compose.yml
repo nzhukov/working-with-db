@@ -1,0 +1,26 @@
+services:
+  # Backend - FastAPI сервер
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: task-manager-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Том для сохранения данных
+      - task-data:/app/data
+      - ./backend/tasks.json:/app/data/tasks.json
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - task-network
+    restart: unless-stopped
+
+networks:
+  task-network:
+    driver: bridge
+
+volumes:
+  task-data:
+    driver: local
