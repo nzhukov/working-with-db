@@ -1,4 +1,18 @@
 services:
+
+  db:
+    image: mysql:8.4
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: my-secret-pw
+    ports:
+      - 33060:3306
+    volumes:
+      - ./mysql-data:/var/lib/mysql
+    networks:
+      - task-network
+    
+
   # Backend - FastAPI сервер
   backend:
     build:
@@ -8,16 +22,16 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Том для сохранения данных
-      # - task-data:/app/data
+      # Тома для сохранения данных
       - tasks-db-data:/db
-      # - ./backend/tasks.json:/app/data/tasks.json
       - ./db:/db
     environment:
       - PYTHONUNBUFFERED=1
     networks:
       - task-network
     restart: unless-stopped
+    depends_on:
+      - db
 
 networks:
   task-network:
